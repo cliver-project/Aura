@@ -1,0 +1,109 @@
+# Aura local infrastructure.
+#
+# Core profile: PostgreSQL + Gitea.
+# Optional profiles:
+#   rag     - RAGFlow knowledge base stack (see infra/ragflow)
+#   actions - Gitea Actions runner (requires a registration token in .env)
+#
+# Everything binds to 127.0.0.1. No service is exposed to the network.
+
+name: aura
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: aura-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aura
+      POSTGRES_PASSWORD: ${AURA_POSTGRES_PASSWORD:-aura}
+      POSTGRES_DB: aura
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - aura_pg_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aura -d aura"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  db-admin:
+    image: sosedoff/pgweb:0.17.0
+    container_name: aura-db-admin
+    restart: unless-stopped
+    command:
+      - "--url=postgres://aura:${AURA_POSTGRES_PASSWORD:-aura}@db:5432/aura?sslmode=disable"
+      - "--bind=0.0.0.0"
+      - "--listen=8081"
+      - "--skip-open"
+    ports:
+      - "127.0.0.1:8081:8081"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  gitea:
+    image: docker.gitea.com/gitea:1.24
+    container_name: aura-gitea
+    restart: unless-stopped
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+      GITEA__database__DB_TYPE: postgres
+      GITEA__database__HOST: db:5432
+      GITEA__database__NAME: gitea
+      GITEA__database__USER: aura
+      GITEA__database__PASSWD: ${AURA_POSTGRES_PASSWORD:-aura}
+      GITEA__server__ROOT_URL: http://localhost:3000/
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__server__SSH_PORT: "2222"
+      GITEA__server__SSH_LISTEN_PORT: "2223"
+      GITEA__server__START_SSH_SERVER: "true"
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__security__LOGIN_REMEMBER_DAYS: "3650"
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__actions__ENABLED: "true"
+      GITEA__repository__DEFAULT_BRANCH: main
+      GITEA__repository__DEFAULT_BRANCH__CREATION: main
+      GITEA__i18n__DEFAULT_LANG: ${AURA_GITEA_LANGUAGE:-en-US}
+      GITEA__session__PROVIDER: file
+      GITEA__session__PROVIDER_CONFIG: /data/gitea/sessions
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:2222:2223"
+    volumes:
+      - aura_gitea_data:/data
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/v1/version || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  runner:
+    image: gitea/act_runner:latest
+    container_name: aura-runner
+    profiles: ["actions"]
+    restart: unless-stopped
+    environment:
+      GITEA_INSTANCE_URL: http://gitea:3000
+      GITEA_RUNNER_REGISTRATION_TOKEN: ${AURA_RUNNER_TOKEN:-}
+      GITEA_RUNNER_NAME: aura-runner
+      GITEA_RUNNER_LABELS: "ubuntu-latest:docker://node:20-bookworm"
+      CONFIG_FILE: /data/config.yaml
+    volumes:
+      - aura_runner_data:/data
+      - ./infra/act_runner/config.yaml:/data/config.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      gitea:
+        condition: service_started
+
+volumes:
+  aura_pg_data:
+  aura_gitea_data:
+  aura_runner_data:
